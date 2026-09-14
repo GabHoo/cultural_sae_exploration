@@ -1,29 +1,68 @@
-# cultural_sae_exploration
-Step 1 — one activation vector per token, for all features (not just top-N)
+# Cultural Neurons
 
-For a sentence with seq_len tokens, running it through GPT-2 and encoding through the SAE gives you:
+Reproduction of Steps 1–2–3b of *Steering LLMs for Culturally Localized Generation*
+(Khanuja et al. — the "CuE" paper), using SAE features to find and steer toward
+country-specific representations inside a language model.
 
+Grounded in the real **CANDLE** dataset (Nguyen et al., 2023), restricted to the
+`rituals` and `traditions` facets.
 
-acts = sae.encode(cache[sae.cfg.metadata.hook_name])[0]  # shape: [seq_len, n_features]
-n_features is ~24,576 for this SAE. So acts is a full matrix: every token gets a value for every feature (most of them are 0, since SAEs are trained to be sparse, but the full row exists — we haven't picked "top N per token" yet at this point).
+See [NOTES.md](NOTES.md) for detailed write-ups of the pipeline's internals
+(pooling logic, the mutual-information formula, how a shared feature basis becomes
+a per-country steering vector, open caveats).
 
-Step 2 — collapse across tokens, per feature (this is the key step)
+## Pipeline
 
+1. **Data prep** (`cultural_neurons/data_prep.py`) — sample country-labeled CANDLE assertions
+   into disjoint train/held-out sets, strip each country's own name out of its text.
+2. **Forward pass** (`cultural_neurons/forward_pass.py`) — model-agnostic: load a (model, SAE)
+   pair from a config preset, run each assertion through it, decompose the residual stream
+   into SAE features.
+3. **Pooling** (`cultural_neurons/pooling.py`) — collapse each assertion's per-token activations
+   into one per-sentence feature vector. Max-pool today, swappable.
+4. **Feature selection** (`cultural_neurons/feature_selection.py`) — rank features by mutual
+   information with country, keep the top ones (a shared set `S`, not one per country).
+5. **Prototypes + steering vector** (`cultural_neurons/steering.py`) — average per-country
+   activations within `S`, build a contrastive direction, decode back into the model's
+   residual-stream space, generate with it hooked in.
+6. **Evaluation** (`cultural_neurons/evaluation.py`) — check whether a steered generation lands
+   closer to the target country's held-out prototype (built from CANDLE assertions the
+   steering vector never saw) than to any other country's. A quick, LLM-free proxy metric —
+   not a substitute for the paper's LLM-as-judge eval, see NOTES.md for the tradeoff.
 
-max_vals, argmax_pos = acts_no_bos.max(dim=0)   # dim=0 = collapse over the token axis
-dim=0 means: for each of the ~24,576 columns (features), look down that column across all token positions and take the single highest value. The result, max_vals, is a vector of length n_features — one number per feature, representing "the strongest this feature ever fired anywhere in this sentence." argmax_pos records which token position gave that peak, per feature.
+## Setup
 
-This is the step that turns "per-token" into "per-sentence": we're not asking "what's big at this token," we're asking "what's the peak value each feature ever reaches across the whole sentence."
+Dependencies are pinned in `pyproject.toml`. With [uv](https://docs.astral.sh/uv/) installed:
 
-Step 3 — now take top-k, but over features, not tokens
+```bash
+uv sync
+```
 
+This creates/updates `.venv` to match `pyproject.toml` exactly.
 
-top = torch.topk(max_vals, k)   # top k features by their per-sentence peak
-Now we pick the top N — but we're picking from the already-collapsed per-feature vector (length n_features), not from a per-token list. So the ordering you get is "features ranked by their single best moment anywhere in this sentence," and argmax_pos tells you which token that moment happened at (used to recover the token in the returned tuple).
+## Usage
 
-So to correct the assumption in your question: we don't compute a top-N per token and then merge those lists. We compute the full dense activation matrix for every token × every feature, reduce it down to one number per feature via max over the token axis, and only take "top N" once, at the very end, over features. A feature makes the sentence-level top-10 by having one standout moment somewhere in the text — it doesn't matter if it's silent everywhere else.
+```bash
+uv run main.py
+```
 
-(For contrast: Neuronpedia's search-topk-by-token endpoint does the opposite order — top-k per token position, kept separate per position — which is a different, finer-grained view than what we're computing here.)
+Runs the full pipeline end-to-end: loads the model/SAE, extracts features, selects
+culturally-informative ones, builds a steering vector, generates an unsteered and a
+steered continuation, and prints a held-out evaluation for both.
 
----------- Still to clean the features from strong activations that are unrelated to the countries
+`sandbox.ipynb` remains available for ad hoc exploration outside the scripted pipeline.
 
+## Config
+
+All tunable options — model/SAE preset, layer, data paths, sample sizes, MI threshold,
+target country, steering strength (alpha), generation params — live in `config.py`. Edit
+that file to change pipeline behavior; nothing else should need editing for routine
+experiments.
+
+## Data
+
+- `data/candle_countries_subset.jsonl` — CANDLE assertions labeled by country (used).
+- `data/candle_religions_subset.jsonl` — CANDLE assertions labeled by religion (currently
+  unused — see NOTES.md for why the religion pipeline is disabled).
+- `data/WorldView-Bench Dataset.csv` — used in an earlier exploration (`sandbox.ipynb`),
+  not part of `main.py`'s pipeline.
