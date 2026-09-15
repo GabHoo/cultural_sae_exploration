@@ -65,13 +65,14 @@ def main():
     )
     raw_groups = restrict(data_prep.load_candle_groups(config.COUNTRIES_PATH, "country"))
     vectors = activation_cache.get_feature_vectors(
-        raw_groups, model, sae, pool_fn, strip_country, config.CANDLE_CACHE_PATH, cache_meta,
+        raw_groups, model, sae, pool_fn, strip_country, config.CACHE_DIR, config.CANDLE_CACHE_NAME, cache_meta,
     )
 
     if config.USE_AUGMENTED:
         raw_augmented_groups = restrict(data_prep.load_candle_groups(config.AUGMENTED_COUNTRIES_PATH, "country"))
         augmented_vectors = activation_cache.get_feature_vectors(
-            raw_augmented_groups, model, sae, pool_fn, strip_country, config.AUGMENTED_CACHE_PATH, cache_meta,
+            raw_augmented_groups, model, sae, pool_fn, strip_country,
+            config.CACHE_DIR, config.AUGMENTED_CACHE_NAME, cache_meta,
         )
         raw_groups = data_prep.merge_groups(raw_groups, raw_augmented_groups)
         vectors = {

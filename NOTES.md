@@ -1,4 +1,5 @@
-# cultural_sae_exploration
+
+
 Step 1 — one activation vector per token, for all features (not just top-N)
 
 For a sentence with seq_len tokens, running it through GPT-2 and encoding through the SAE gives you:
@@ -14,14 +15,6 @@ max_vals, argmax_pos = acts_no_bos.max(dim=0)   # dim=0 = collapse over the toke
 dim=0 means: for each of the ~24,576 columns (features), look down that column across all token positions and take the single highest value. The result, max_vals, is a vector of length n_features — one number per feature, representing "the strongest this feature ever fired anywhere in this sentence." argmax_pos records which token position gave that peak, per feature.
 
 This is the step that turns "per-token" into "per-sentence": we're not asking "what's big at this token," we're asking "what's the peak value each feature ever reaches across the whole sentence."
-
-Step 3 — now take top-k, but over features, not tokens
-
-
-top = torch.topk(max_vals, k)   # top k features by their per-sentence peak
-Now we pick the top N — but we're picking from the already-collapsed per-feature vector (length n_features), not from a per-token list. So the ordering you get is "features ranked by their single best moment anywhere in this sentence," and argmax_pos tells you which token that moment happened at (used to recover the token in the returned tuple).
-
-So to correct the assumption in your question: we don't compute a top-N per token and then merge those lists. We compute the full dense activation matrix for every token × every feature, reduce it down to one number per feature via max over the token axis, and only take "top N" once, at the very end, over features. A feature makes the sentence-level top-10 by having one standout moment somewhere in the text — it doesn't matter if it's silent everywhere else.
 
 (For contrast: Neuronpedia's search-topk-by-token endpoint does the opposite order — top-k per token position, kept separate per position — which is a different, finer-grained view than what we're computing here.)
 
@@ -105,10 +98,21 @@ For a culture-agnostic prompt (e.g. *"Describe a typical breakfast."*), generate
 That baseline is what makes the steered number mean anything. A steered rank of #1 is a strong result if the unsteered baseline was #15 for the same prompt and target — steering did real work. It's a much weaker result if the unsteered baseline was already #2 — the model was basically already there, steering barely mattered. You can't tell those two situations apart from the steered number alone; you need the matched unsteered-vs-steered comparison, *for the same target*, to isolate what steering actually contributed. (As a bonus, averaging the unsteered `predicted` country across many prompts and targets — free, since it's the same cached generations — gives a rough readout of the model's implicit cultural default, the same kind of thing the paper's RQ3 measures: without any steering, does the model just default to the US/UK regardless of what's asked?)
 
 **What gets reported**, per target country, averaged over the 10 prompts in `data/eval_prompts.json`:
-- `avg_rank` — where the target country landed in the full 22-country similarity ranking (1 = best), for unsteered and steered separately.
-- `hit_rate` — how often the target country was the #1 nearest prototype, unsteered vs steered.
+- `avg_rank` — where the target country landed in the full country similarity ranking (1 = best), for unsteered and steered separately, averaged across all 10 prompts.
+- `hit_rate` — the *fraction* of those 10 prompts where the target country was the #1 nearest prototype (so `0.6` = 6 of 10 prompts), unsteered vs steered.
 
-A convincing steering effect looks like a clear gap: steered `avg_rank` meaningfully lower (closer to 1) and/or `hit_rate` meaningfully higher than the unsteered baseline, for the same target.
+They're not measuring the same thing, which is why both get reported rather than picking one: `hit_rate` is binary per prompt (either the target won #1 or it didn't) — coarse, but directly answers "how often did steering actually win." `avg_rank` is continuous — it still registers a country moving from rank 4 to rank 2 as progress, even though that's a `0` in `hit_rate` both before and after. A country stuck permanently at rank 2 would show `hit_rate = 0%` forever while genuinely getting closer over time, which only `avg_rank` would catch.
+
+**Worked example**, from a real run (`results/gemma-3-1b_layer17_c4_train0.67_holdout0.33_20260915-181449.json`, 4 target countries, alpha=1.5) — one single prompt for target `Mexico`, "Describe a typical breakfast.":
+
+- *Unsteered* ranking: `Canada 0.455, Mexico 0.431, Japan -0.336, India -0.558` → Mexico is 2nd → this prompt's `target_rank = 2`, doesn't count toward `hit_rate`.
+- *Steered* (toward Mexico) ranking: `Mexico 0.298, Canada 0.272, Japan -0.219, India -0.362` → Mexico flipped to 1st → `target_rank = 1`, this prompt now counts as a hit.
+
+That's one prompt. Averaged over all 10 prompts for the `Mexico` target in that same run: `avg_rank_unsteered = 1.4 → avg_rank_steered = 1.3` (small improvement — Mexico was already landing 1st or 2nd most of the time even unsteered) and `hit_rate_unsteered = 0.6 → hit_rate_steered = 0.7` (went from winning 6/10 prompts to 7/10 — the breakfast prompt above is that 7th win). Modest, but a real, consistent gap in the direction steering should push.
+
+Contrast with `India` in that same run: `avg_rank_unsteered = 3.8 → avg_rank_steered = 3.8` and `hit_rate = 0.0 → 0.0`, completely unchanged (out of 4 target countries here, rank 3.8 is nearly worst-possible). Steering did essentially nothing for India in this run — consistent with the "some countries steer more easily than others" caveat noted earlier (thinner `S`-prototype coverage, or this run's single-layer/alpha limitations from the "Why was generated text so low quality?" section below).
+
+A convincing steering effect looks like a clear gap in both directions at once, like the Mexico case: steered `avg_rank` meaningfully lower (closer to 1) *and* `hit_rate` meaningfully higher than the unsteered baseline, for the same target. India shows what "no effect" looks like in this same schema — both numbers identical before and after.
 
 **What this evaluation is *not***: it's a proxy for "did the internal representation move toward the target," entirely inside the model's own SAE-feature space. It says nothing about surface text quality, fluency, or whether a human would actually read the output as culturally faithful — that's what the paper's LLM-as-judge evaluation is for, and we don't have that infrastructure here (see the data augmentation section above for the related tradeoff of not having a truly independent verifier model).
 

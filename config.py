@@ -58,7 +58,7 @@ COUNTRIES_PATH = "data/candle_countries_subset.jsonl"
 RELIGIONS_PATH = "data/candle_religions_subset.jsonl"   # currently unused - religion pipeline is disabled (see NOTES.md)
 WORLDVIEW_BENCH_PATH = "data/WorldView-Bench Dataset.csv"
 
-COUNTRIES = ["Japan", "Mexico", "Canada"]   # e.g. ["Japan", "Mexico", "Canada"] to restrict the whole pipeline (MI, prototypes,
+COUNTRIES = None  # e.g. ["Japan", "Mexico", "Canada"] to restrict the whole pipeline (MI, prototypes,
                     # sanity eval) to just those countries - faster iteration. None = use all countries
                     # found in COUNTRIES_PATH.
 
@@ -114,12 +114,15 @@ AUGMENTATION_VERIFY_MODEL = "claude-sonnet-5"
 # ============================================================
 # Activation cache (see cultural_neurons/activation_cache.py)
 # ============================================================
-# Per-assertion pooled SAE feature vectors, keyed by (country, raw assertion text) -
-# one file per data source, covering ALL assertions in that source (not just a sampled
-# subset), so changing TRAIN_FRACTION / HELDOUT_FRACTION / COUNTRIES never needs a new
-# forward pass - only new data (or a changed preset/layer/pooling/alias config) does.
-CANDLE_CACHE_PATH = "data/cache/candle_countries_activations.npz"
-AUGMENTED_CACHE_PATH = "data/cache/candle_countries_augmented_activations.npz"
+# Per-assertion pooled SAE feature vectors, keyed by (country, raw assertion text),
+# covering ALL assertions in a source (not just a sampled subset), so changing
+# TRAIN_FRACTION / HELDOUT_FRACTION / COUNTRIES never needs a new forward pass - only
+# new data does. Each (model, SAE release, layer, pooling, aliases) config gets its own
+# file under CACHE_DIR (see activation_cache.cache_path()) - switching PRESET_NAME/LAYER
+# back and forth reuses whichever cache already exists instead of overwriting it.
+CACHE_DIR = "data/cache"
+CANDLE_CACHE_NAME = "candle_countries"
+AUGMENTED_CACHE_NAME = "candle_countries_augmented"
 
 # ============================================================
 # Pooling
@@ -134,7 +137,7 @@ MI_RHO = 0.1   # keep the smallest top-MI feature prefix whose cumulative MI rea
 # ============================================================
 # Steering
 # ============================================================
-ALPHA = 1.0                 # steering strength; alpha=0 reproduces the unsteered baseline. The paper
+ALPHA = 1.5                 # steering strength; alpha=0 reproduces the unsteered baseline. The paper
                              # (App. C) sweeps alpha in {0.25, 0.5, 1, 2} per country and DISCARDS any
                              # value that produces low-fluency generations - it never uses one fixed
                              # value for every country. We don't have that fluency-filtered sweep here
@@ -142,7 +145,7 @@ ALPHA = 1.0                 # steering strength; alpha=0 reproduces the unsteere
                              # which sits outside anything the paper validated and risks degenerate
                              # output on its own, on top of the -pt/-it prompting mismatch (see PRESETS).
 EVAL_PROMPTS_PATH = "data/eval_prompts.json"   # culture-agnostic prompts, like the paper's evaluation set (Table 4)
-N_TARGET_SAMPLE = 1         # how many countries to evaluate as steering targets; set to None to run all 22
+N_TARGET_SAMPLE = None         # how many countries to evaluate as steering targets; set to None to run all 22
 EVAL_RESULTS_DIR = "results"   # each run writes its own timestamped file here - see main.py's results_path()
 MAX_NEW_TOKENS = 50
 TEMPERATURE = 0.9

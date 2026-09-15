@@ -18,6 +18,9 @@ continuation the same way training data was encoded, then check whether it lands
 to the target country's held-out prototype than to any other country's. This is a proxy
 for "did the internal representation move toward the target," not for surface-level text
 quality - see NOTES.md for the tradeoff against an LLM-judge eval.
+
+Both stages center prototypes/query vectors by subtracting the global mean prototype
+(mu_global, paper Sec 2.4) before computing cosine similarity - see center_prototypes().
 """
 
 from collections import defaultdict
@@ -41,6 +44,32 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if denom == 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+def center_prototypes(prototypes: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """
+    Paper Sec 2.4 (Step 3a): mu_global = mean of ALL countries' prototypes. A feature can
+    clear the MI bar (its firing rate does vary by country) while still carrying a large
+    activation component shared by almost every country - e.g. a "food ritual" feature
+    that fires somewhat more for one country but is active across most assertions
+    regardless. Left uncentered, that shared component dominates cosine similarity and
+    dilutes the country-specific angle MI selected S for in the first place. Subtracting
+    mu_global before comparing removes it - this is a SEPARATE operation from
+    build_steering_vector's "subtract mean of the 21 OTHER countries" contrast (which
+    stays target-exclusive on purpose); this one subtracts the mean of every country,
+    including whichever one is being scored, purely to re-center the coordinate system.
+
+    Input:
+        prototypes — {label: prototype}, e.g. from steering.build_prototypes()
+
+    Output:
+        (centered_prototypes, mu_global) — centered_prototypes has the same keys/shapes
+        as the input, each with mu_global subtracted; mu_global is [len(S)], the mean
+        prototype across every label in the input, for centering query vectors the same way.
+    """
+    mu_global = np.mean(list(prototypes.values()), axis=0)
+    centered = {label: proto - mu_global for label, proto in prototypes.items()}
+    return centered, mu_global
 
 
 def rank_by_similarity(
@@ -90,13 +119,14 @@ def evaluate_holdout_separability(
             "n"            — total held-out assertions evaluated
             "per_country"  — {country: accuracy restricted to that country's held-out rows}
     """
-    vecs = X_holdout[:, S]
+    centered_prototypes, mu_global = center_prototypes(prototypes)
+    vecs = X_holdout[:, S] - mu_global
     correct = 0
     per_country_correct: dict[str, int] = defaultdict(int)
     per_country_total: dict[str, int] = defaultdict(int)
 
     for vec, true_label in zip(vecs, y_holdout):
-        predicted = rank_by_similarity(vec, prototypes)[0][0]
+        predicted = rank_by_similarity(vec, centered_prototypes)[0][0]
         per_country_total[true_label] += 1
         if predicted == true_label:
             correct += 1
@@ -140,9 +170,10 @@ def evaluate_generation(
             "target_rank"    — target_label's 1-indexed position in the ranking
             "target_similarity" — target_label's raw cosine similarity
     """
+    centered_prototypes, mu_global = center_prototypes(holdout_prototypes)
     pooled = pool_fn(get_activations(text, model, sae)).cpu().numpy()
-    vec = pooled[S]
-    ranking = rank_by_similarity(vec, holdout_prototypes)
+    vec = pooled[S] - mu_global
+    ranking = rank_by_similarity(vec, centered_prototypes)
     labels_in_order = [label for label, _ in ranking]
     return {
         "ranking": ranking,
