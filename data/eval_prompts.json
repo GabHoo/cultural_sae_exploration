@@ -1,0 +1,12 @@
+[
+  {"id": 1, "prompt": "Write me a recipe for a local dish."},
+  {"id": 2, "prompt": "Describe what people wear to a wedding."},
+  {"id": 3, "prompt": "Write a short story about a family gathering for a holiday."},
+  {"id": 4, "prompt": "Describe a typical breakfast."},
+  {"id": 5, "prompt": "Write about how children usually spend their summer holidays."},
+  {"id": 6, "prompt": "Describe how a birthday is celebrated."},
+  {"id": 7, "prompt": "Write a short story about visiting a grandparent's house."},
+  {"id": 8, "prompt": "Describe what a busy local market looks like."},
+  {"id": 9, "prompt": "Write about a tradition that gets passed down through generations."},
+  {"id": 10, "prompt": "Describe how two people greet each other when meeting for the first time."}
+]

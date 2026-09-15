@@ -1,11 +1,26 @@
 """
-Quick, LLM-free steering evaluation: encode a generated continuation the same way
-training data was encoded, then check whether it lands closer to the target country's
-HELD-OUT prototype (built from real CANDLE assertions the steering vector never saw)
-than to any other country's. This is a proxy for "did the internal representation move
-toward the target," not for surface-level text quality - see NOTES.md for the tradeoff
-against an LLM-judge eval.
+Two evaluation stages, meant to run in order.
+
+Stage 1 (evaluate_holdout_separability) is a sanity gate, not a steering eval at all:
+it checks whether held-out assertions - real CANDLE/augmented text, never touched by
+generation or steering - still classify correctly against country prototypes built from
+TRAINING data alone. Both train and held-out have the country's own name stripped (see
+data_prep.strip_country), on purpose: the steered generations scored in Stage 2 never
+contain the literal country name either, so held-out has to be stripped the same way for
+the comparison to be fair. But stripping could in principle make the text too generic to
+separate at all - this stage checks that empirically instead of assuming it either way.
+If accuracy here isn't well above the 1/22 ~= 4.5% random baseline, the feature set S (or
+the stripping) is destroying real signal, and no steering vector built from this pipeline
+will evaluate meaningfully downstream.
+
+Stage 2 (evaluate_generation) is the actual steering evaluation: encode a generated
+continuation the same way training data was encoded, then check whether it lands closer
+to the target country's held-out prototype than to any other country's. This is a proxy
+for "did the internal representation move toward the target," not for surface-level text
+quality - see NOTES.md for the tradeoff against an LLM-judge eval.
 """
+
+from collections import defaultdict
 
 import numpy as np
 from sae_lens import SAE
@@ -45,6 +60,56 @@ def rank_by_similarity(
     """
     scored = [(label, cosine_similarity(vec, proto)) for label, proto in prototypes.items()]
     return sorted(scored, key=lambda kv: kv[1], reverse=True)
+
+
+def evaluate_holdout_separability(
+    X_holdout: np.ndarray,
+    y_holdout: np.ndarray,
+    S: np.ndarray,
+    prototypes: dict[str, np.ndarray],
+) -> dict:
+    """
+    Stage 1 sanity gate - run this BEFORE building any steering vector. For every
+    held-out assertion, find its nearest country prototype by cosine similarity and
+    check whether it matches that assertion's true label. No generation, no steering:
+    this only asks whether real held-out text is still separable in this feature space.
+
+    Input:
+        X_holdout  — np.ndarray [n_holdout, n_features], pooled SAE activations for
+                     held-out assertions (forward_pass.extract_feature_matrix() on
+                     data_prep's held-out split)
+        y_holdout  — np.ndarray [n_holdout] of true country labels, parallel to X_holdout's rows
+        S          — selected feature indices, from feature_selection.select_top_mi()
+        prototypes — {country: prototype}, built from TRAINING data only
+                     (steering.build_prototypes() on the train split - never the held-out one)
+
+    Output:
+        dict with:
+            "accuracy"     — fraction of held-out assertions whose nearest prototype
+                             matches their true country label
+            "n"            — total held-out assertions evaluated
+            "per_country"  — {country: accuracy restricted to that country's held-out rows}
+    """
+    vecs = X_holdout[:, S]
+    correct = 0
+    per_country_correct: dict[str, int] = defaultdict(int)
+    per_country_total: dict[str, int] = defaultdict(int)
+
+    for vec, true_label in zip(vecs, y_holdout):
+        predicted = rank_by_similarity(vec, prototypes)[0][0]
+        per_country_total[true_label] += 1
+        if predicted == true_label:
+            correct += 1
+            per_country_correct[true_label] += 1
+
+    return {
+        "accuracy": correct / len(y_holdout),
+        "n": len(y_holdout),
+        "per_country": {
+            country: per_country_correct[country] / total
+            for country, total in per_country_total.items()
+        },
+    }
 
 
 def evaluate_generation(

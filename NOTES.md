@@ -79,3 +79,52 @@ So the pipeline is: **MI (global, country-blind) → `S`, a shared basis → pro
 
 **A caveat worth flagging**: because `S` is chosen by one global ranking, it can end up imbalanced — if a handful of countries have unusually separable assertions, their features could dominate the top of the ranking before the cumulative-10% cutoff is reached, leaving other countries with thinner, weaker prototypes (fewer of `S`'s dimensions actually "belong" to them). This is consistent with — though not a confirmed explanation of — the paper's own RQ5 finding that some countries steer more easily than others. Not yet checked empirically here; a quick diagnostic would be counting, per country, how many of `S`'s features have a non-trivial value in that country's prototype.
 
+---
+
+## Evaluation: two stages, two different questions
+
+Two-line version, before the detail:
+
+- **Stage 1** asks: *"before touching steering at all — can this feature space even tell countries apart?"*
+- **Stage 2** asks: *"does nudging generation toward a country actually make it look more like that country than doing nothing would?"*
+
+Stage 1 is a sanity gate that has to pass before Stage 2's numbers mean anything. Both live in `cultural_neurons/evaluation.py`.
+
+### Stage 1 — sanity gate (`evaluate_holdout_separability`)
+
+No generation, no steering vector — this only checks the representation itself. Take real held-out text (CANDLE/augmented assertions the training step never saw, country name stripped out same as training data), encode it, and ask: *"whose cultural fingerprint (prototype) does this text land closest to?"* Check that against the true label and report accuracy over the whole held-out set — plus a per-country breakdown, since some countries may separate better than others.
+
+Why this needs to be checked rather than assumed: stripping the country's own name out of every assertion (so `China` isn't just detected by the literal word "China") is necessary to avoid a trivial shortcut — but it's also a real risk in the other direction. Strip too aggressively and the remaining text might be so generic that *nothing* could tell it apart, regardless of how good the model's cultural representation actually is. Stage 1 answers that empirically: if accuracy is near the random baseline (`1/22 ≈ 4.5%` for our 22 countries), the feature set or the stripping is destroying real signal, and no steering result downstream can be trusted no matter how good it looks. If it's well above baseline, the harder, stripped setting still carries genuine signal, and Stage 2 is worth running.
+
+### Stage 2 — does steering work? (`evaluate_generation`, looped per target country in `main.py`)
+
+For a culture-agnostic prompt (e.g. *"Describe a typical breakfast."*), generate two continuations: **unsteered** (no intervention) and **steered** (the target country's steering vector added in). Encode both the same way training data was encoded, then check which country's *held-out* prototype each one lands closest to — held-out, not the training prototype, so the eval isn't just confirming "we recreated the exact data the steering vector was built from" (see the `prototypes_train` vs `prototypes_holdout` note above).
+
+**Why the unsteered baseline gets a target label too, even though it wasn't aiming at anything**: this trips people up, reasonably, so it's worth spelling out. `alpha=0` means no steering vector is added at all — the unsteered text is the same regardless of which country we're about to evaluate it against, and `main.py` generates it exactly once per prompt, then reuses it for every target country. Scoring that *same* unsteered text against, say, China's prototype isn't asking "did this text succeed at being about China" — it never tried to be. It's establishing a **baseline**: *"before any intervention, how close does the model's default output already sit to China?"*
+
+That baseline is what makes the steered number mean anything. A steered rank of #1 is a strong result if the unsteered baseline was #15 for the same prompt and target — steering did real work. It's a much weaker result if the unsteered baseline was already #2 — the model was basically already there, steering barely mattered. You can't tell those two situations apart from the steered number alone; you need the matched unsteered-vs-steered comparison, *for the same target*, to isolate what steering actually contributed. (As a bonus, averaging the unsteered `predicted` country across many prompts and targets — free, since it's the same cached generations — gives a rough readout of the model's implicit cultural default, the same kind of thing the paper's RQ3 measures: without any steering, does the model just default to the US/UK regardless of what's asked?)
+
+**What gets reported**, per target country, averaged over the 10 prompts in `data/eval_prompts.json`:
+- `avg_rank` — where the target country landed in the full 22-country similarity ranking (1 = best), for unsteered and steered separately.
+- `hit_rate` — how often the target country was the #1 nearest prototype, unsteered vs steered.
+
+A convincing steering effect looks like a clear gap: steered `avg_rank` meaningfully lower (closer to 1) and/or `hit_rate` meaningfully higher than the unsteered baseline, for the same target.
+
+**What this evaluation is *not***: it's a proxy for "did the internal representation move toward the target," entirely inside the model's own SAE-feature space. It says nothing about surface text quality, fluency, or whether a human would actually read the output as culturally faithful — that's what the paper's LLM-as-judge evaluation is for, and we don't have that infrastructure here (see the data augmentation section above for the related tradeoff of not having a truly independent verifier model).
+
+---
+
+## Why was generated text so low quality? (and what we changed)
+
+Investigated by re-reading the actual paper (Khanuja et al. 2026, *Steering LLMs for Culturally Localized Generation*, arXiv:2603.23301 — found and PDF-extracted via `pypdf` since the bundled PDF's own text layer isn't machine-searchable without `poppler`) plus general literature on activation steering and prompting base models. Three separate causes stacked on top of each other:
+
+**1. Biggest factor: we were generating from the base (`-pt`) model, but prompting it like an instruction-tuned one.** Our eval prompts are direct commands ("Write me a recipe for a local dish."). A base/pretrained model was never trained to *comply* with instructions — it was only trained to continue text statistically. Given a command it doesn't recognize as a pattern from pretraining data, it just continues however is locally plausible, which reads as "trash": off-topic, repetitive, or a continuation of the *prompt's shape* rather than an answer. This isn't specific to our reproduction — the paper hit the exact same tension and explicitly solved it: *"For Gemma models, we use the instruction-tuned variants to support open-ended generation; SAEs trained on the base models have been shown to transfer effectively to these variants"* (Sec 3, "Models"). In other words: keep the SAE trained on the base checkpoint (that's the only thing GemmaScope publishes), but swap the actual model doing the generating (and the assertion-encoding) to the `-it` checkpoint. Same architecture, same hook points, so the base-trained SAE decomposes the `-it` model's residual stream just fine.
+
+   **What changed**: `config.PRESETS` now points every Gemma preset's `"model"` field at the `-it` checkpoint (`google/gemma-3-1b-it`, `gemma-2-9b-it`, etc.) while `"release"` stays on the base-trained SAE release, exactly matching the paper's setup. `gemma-1-2b` (predates GemmaScope, unrelated community SAE) and `llama-3.1-8b` (paper's transfer claim is scoped to "Gemma models" only) were left as-is.
+
+**2. `ALPHA` was set far outside anything the paper actually validated.** App. C: they sweep `alpha ∈ {0.25, 0.5, 1, 2}` **per country**, and explicitly *discard* any alpha that produces low-fluency generations before reporting results — fluency is used purely as a filter, never optimized past. We had `ALPHA = 3.0` hardcoded globally, well above their max tested value, with no fluency check of any kind. At that strength the steering hook can push the residual stream far enough off-distribution to break coherence outright, independent of the base/instruct issue above. Lowered the default to `1.0` (mid of their tested range) as a safer starting point — a real fix would be a per-country fluency-filtered sweep like the paper's, which we don't have yet (`evaluate_generation` has no fluency signal at all currently — see the "not" caveat just above).
+
+**3. Structural ceiling, not easily fixable: single-layer steering vs. the paper's all-layer steering.** The paper applies its steering vector at *every layer* of the model simultaneously (Sec 3, App. C) for the SAE widths where that's feasible (Gemma-2-2B-16K, Gemma-2-9B-16K, Llama-3.1-8B-32K) — spreading the intervention thin across the whole network. Our reproduction, on `gemma-3-1b` via GemmaScope-2, can only steer at **one** of just 3 available layers (13, 17, or 22 — GemmaScope-2 doesn't ship per-layer SAEs for Gemma 3 the way the original GemmaScope does for Gemma 2). A single-layer intervention needs a proportionally larger `alpha` to produce a comparable behavioral shift to the paper's distributed one — which pushes straight into the fluency-destroying regime from point 2. This is a real limitation of reproducing on Gemma-3 specifically; the closest faithful reproduction of the paper's own setup would be switching `PRESET_NAME` to `gemma-2-9b` (their actual model, with full per-layer 16k SAE coverage) or `gemma-2-2b` as a lighter middle ground — not fixable by prompt or alpha tuning alone on Gemma-3.
+
+**Side finding, not yet acted on**: the paper's actual evaluation prompts (App. D, Table 4 — 24 prompts, e.g. "Write me a short story about a boy and his kite", "Explain photosynthesis as if I'm five years old") are pure creative-writing prompts where culture only shows up incidentally, distinct in character from several of our 10 hand-written prompts (e.g. "Describe what people wear to a wedding") which ask about cultural practices more directly. Not a bug, just worth knowing our eval set isn't a literal reproduction of Table 4 if exact comparability to the paper's numbers ever matters.
+

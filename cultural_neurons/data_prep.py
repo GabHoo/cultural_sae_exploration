@@ -37,6 +37,21 @@ def load_candle_groups(path: str, label_key: str) -> dict[str, list[str]]:
     return groups
 
 
+def load_eval_prompts(path: str) -> list[str]:
+    """
+    Load culture-agnostic prompts used to generate (and then evaluate) steered text.
+
+    Input:
+        path — path to a JSON file holding a list of {"id": int, "prompt": str} objects
+
+    Output:
+        list[str] of prompts, in file order.
+    """
+    with open(path) as f:
+        rows = json.load(f)
+    return [row["prompt"] for row in rows]
+
+
 def merge_groups(*group_dicts: dict[str, list[str]]) -> dict[str, list[str]]:
     """
     Concatenate several {label: [text, ...]} dicts into one, e.g. to combine the
@@ -59,22 +74,25 @@ def merge_groups(*group_dicts: dict[str, list[str]]) -> dict[str, list[str]]:
 
 def train_holdout_split(
     groups: dict[str, list[str]],
-    n_train: int,
-    n_holdout: int,
+    train_frac: float,
+    holdout_frac: float,
     seed: int,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """
     Per group, draw two DISJOINT random samples: one for training (feature selection +
     training prototypes), one held out for evaluation (see NOTES.md - held-out prototypes
     exist so steering can be scored against real text the steering vector was never built
-    from, instead of comparing against its own training data).
+    from, instead of comparing against its own training data). Fractions are relative to
+    each group's own size, so a smaller country (e.g. Turkey) still gets a proportional
+    split instead of being capped against a fixed count meant for bigger countries.
 
     Input:
-        groups    — {label: [assertion, ...]}, e.g. from load_candle_groups()
-        n_train   — assertions to sample per group for training (capped at what's available)
-        n_holdout — assertions to sample per group for held-out eval, from what's left
-                    after n_train is removed (capped at what's available)
-        seed      — random seed, for reproducible sampling across reruns
+        groups       — {label: [assertion, ...]}, e.g. from load_candle_groups()
+        train_frac   — fraction (0-1) of each group's assertions to sample for training
+        holdout_frac — fraction (0-1) of each group's assertions to sample for held-out
+                        eval, drawn from what's left after train_frac is removed (capped
+                        at what remains, so train_frac + holdout_frac can safely exceed 1)
+        seed         — random seed, for reproducible sampling across reruns
 
     Output:
         (train_groups, holdout_groups) — same shape as `groups`, but every group's list
@@ -86,8 +104,11 @@ def train_holdout_split(
     for label, texts in groups.items():
         shuffled = texts[:]
         rng.shuffle(shuffled)
+        n_train = int(len(shuffled) * train_frac)
+        remaining = shuffled[n_train:]
+        n_holdout = min(int(len(shuffled) * holdout_frac), len(remaining))
         train_groups[label] = shuffled[:n_train]
-        holdout_groups[label] = shuffled[n_train:n_train + n_holdout]
+        holdout_groups[label] = remaining[:n_holdout]
     return train_groups, holdout_groups
 
 
