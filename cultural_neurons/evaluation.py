@@ -29,6 +29,7 @@ import numpy as np
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
 
+from cultural_neurons import layers as layers_module
 from cultural_neurons.forward_pass import get_activations
 
 
@@ -146,21 +147,29 @@ def evaluate_generation(
     text: str,
     target_label: str,
     S: np.ndarray,
+    boundaries: dict[int, tuple[int, int]],
     holdout_prototypes: dict[str, np.ndarray],
     model: HookedTransformer,
-    sae: SAE,
+    saes: dict[int, SAE],
     pool_fn,
 ) -> dict:
     """
-    Score one generated text against the held-out prototypes.
+    Score one generated text against the held-out prototypes. Encodes the text through
+    EVERY layer's SAE and concatenates in the same layer order used everywhere else
+    (layers.concat_vectors), so the resulting vector lives in the same joint feature
+    space X_train/X_holdout and the prototypes were built in - S then restricts it
+    exactly as it restricts those.
 
     Input:
         text               — a generated continuation (steered or unsteered)
         target_label       — the country steering was aimed at
-        S                  — selected feature indices, from feature_selection.select_top_mi()
+        S                  — selected GLOBAL feature indices (joint axis across layers),
+                             from feature_selection.select_top_mi()
+        boundaries          — {layer: (start, end)}, from layers.layer_boundaries()
         holdout_prototypes — {label: prototype}, built from held-out CANDLE assertions
                               (never used to build the steering vector)
-        model, sae         — as returned by forward_pass.load_model_and_sae()
+        model, saes         — model from forward_pass.load_model(); saes is {layer: SAE},
+                              e.g. from layers.load_saes()
         pool_fn            — pooling function, e.g. pooling.POOLING_FUNCS["max"]
 
     Output:
@@ -171,7 +180,11 @@ def evaluate_generation(
             "target_similarity" — target_label's raw cosine similarity
     """
     centered_prototypes, mu_global = center_prototypes(holdout_prototypes)
-    pooled = pool_fn(get_activations(text, model, sae)).cpu().numpy()
+    pooled_by_layer = {
+        layer: pool_fn(get_activations(text, model, sae)).cpu().numpy()
+        for layer, sae in saes.items()
+    }
+    pooled = layers_module.concat_vectors(pooled_by_layer, boundaries)
     vec = pooled[S] - mu_global
     ranking = rank_by_similarity(vec, centered_prototypes)
     labels_in_order = [label for label, _ in ranking]

@@ -20,6 +20,8 @@ import os
 import re
 
 import numpy as np
+from sae_lens import SAE
+from tqdm.auto import tqdm
 
 from cultural_neurons import forward_pass
 
@@ -34,7 +36,8 @@ def cache_meta(model_name: str, sae_release: str, layer: int, pooling: str, alia
     Input:
         model_name  — preset["model"], the HookedTransformer checkpoint actually loaded
         sae_release — preset["release"], the SAE release actually loaded
-        layer        — config.LAYER
+        layer        — one entry of the resolved config.LAYERS (a single layer's cache is
+                       always per-layer, even in multi-layer mode - see main.py)
         pooling      — config.POOLING_STRATEGY
         alias_map    — config.COUNTRY_ALIASES (affects what text actually gets embedded)
 
@@ -140,4 +143,76 @@ def get_feature_vectors(
     for (country, raw), vec in cache.items():
         if country in out:
             out[country][raw] = vec
+    return out
+
+
+def get_feature_vectors_multi_layer(
+    groups: dict[str, list[str]],
+    model,
+    saes: dict[int, SAE],
+    pool_fn,
+    strip_fn,
+    cache_dir: str,
+    source_name: str,
+    meta_by_layer: dict[int, dict],
+) -> dict[int, dict[str, dict[str, np.ndarray]]]:
+    """
+    Multi-layer version of get_feature_vectors(): one pooled feature vector per
+    assertion, PER LAYER in `saes`, each layer cached in its own file (via cache_meta/
+    cache_path per layer, exactly as the single-layer path does). The one thing this
+    does differently from just calling get_feature_vectors() once per layer: the
+    expensive part of a forward pass is the transformer itself, which is shared across
+    every layer's SAE - so for any assertion missing at least one layer, this runs ONE
+    model.run_with_cache (fetching only the still-missing layers' hook points) and
+    encodes through each missing layer's SAE from that single cache, instead of
+    re-running the full transformer forward pass once per layer.
+
+    Input:
+        groups        — {country: [raw_assertion, ...]}, e.g. from load_candle_groups()
+        model         — from forward_pass.load_model_and_sae() (or any HookedTransformer)
+        saes          — {layer: SAE}, e.g. from layers.load_saes()
+        pool_fn       — from pooling.POOLING_FUNCS
+        strip_fn      — from data_prep.make_stripper()
+        cache_dir     — directory holding cache files (created if missing)
+        source_name   — short tag for this data source, e.g. "candle_countries"
+        meta_by_layer — {layer: cache_meta(...)}, one fingerprint per layer
+
+    Output:
+        {layer: {country: {raw_assertion: feature_vector}}} covering every assertion in
+        `groups`, for every layer in `saes`.
+    """
+    paths = {layer: cache_path(cache_dir, source_name, meta_by_layer[layer]) for layer in saes}
+    caches = {layer: _load(paths[layer], meta_by_layer[layer]) for layer in saes}
+
+    missing_layers_by_text: dict[tuple[str, str], list[int]] = {}
+    for country, raws in groups.items():
+        for raw in raws:
+            missing = [layer for layer in saes if (country, raw) not in caches[layer]]
+            if missing:
+                missing_layers_by_text[(country, raw)] = missing
+
+    if missing_layers_by_text:
+        print(f"activation cache (multi-layer) [{source_name}]: {len(missing_layers_by_text)} assertions "
+              f"need at least one of {sorted(saes.keys())} layers embedded")
+        for (country, raw), missing in tqdm(missing_layers_by_text.items()):
+            stripped = strip_fn(raw, country)
+            tokens = model.to_tokens(stripped)
+            needed_hook_names = {saes[layer].cfg.metadata.hook_name for layer in missing}
+            _, cache = model.run_with_cache(tokens, prepend_bos=True, names_filter=lambda n: n in needed_hook_names)
+            for layer in missing:
+                acts = saes[layer].encode(cache[saes[layer].cfg.metadata.hook_name])[0][1:]   # drop BOS
+                caches[layer][(country, raw)] = pool_fn(acts).cpu().numpy()
+        for layer in saes:
+            _save(paths[layer], caches[layer], meta_by_layer[layer])
+    else:
+        print(f"activation cache (multi-layer) [{source_name}]: full hit across all {len(saes)} layers, "
+              f"no forward pass needed")
+
+    out: dict[int, dict[str, dict[str, np.ndarray]]] = {}
+    for layer in saes:
+        layer_out: dict[str, dict[str, np.ndarray]] = {country: {} for country in groups}
+        for (country, raw), vec in caches[layer].items():
+            if country in layer_out:
+                layer_out[country][raw] = vec
+        out[layer] = layer_out
     return out

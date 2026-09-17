@@ -25,9 +25,27 @@ def get_device() -> str:
     return "cpu"
 
 
+def load_model(preset: dict, device: str) -> HookedTransformer:
+    """
+    Load just the base language model from a PRESETS entry - no SAE. Split out from
+    load_model_and_sae() so multi-layer setups can load the model once and then load N
+    SAEs against it separately (see cultural_neurons/layers.py's load_saes()).
+
+    Input:
+        preset — one value from config.PRESETS, e.g. {"model": ..., "release": ..., "hook_template": ...}
+        device — "mps" / "cuda" / "cpu", from get_device()
+
+    Output:
+        A loaded HookedTransformer.
+    """
+    return HookedTransformer.from_pretrained(preset["model"], device=device)
+
+
 def load_model_and_sae(preset: dict, layer: int, device: str) -> tuple[HookedTransformer, SAE]:
     """
     Load the base language model and its matching SAE for one layer, from a PRESETS entry.
+    Single-layer convenience wrapper around load_model() - for multi-layer setups, use
+    load_model() + cultural_neurons.layers.load_saes() instead.
 
     Input:
         preset — one value from config.PRESETS, e.g. {"model": ..., "release": ..., "hook_template": ...}
@@ -39,7 +57,7 @@ def load_model_and_sae(preset: dict, layer: int, device: str) -> tuple[HookedTra
         model's hook points. The actual hook point name is sae.cfg.metadata.hook_name - it does not
         necessarily match preset["hook_template"] (see note in config.py).
     """
-    model = HookedTransformer.from_pretrained(preset["model"], device=device)
+    model = load_model(preset, device)
     sae = SAE.from_pretrained(
         release=preset["release"],
         sae_id=preset["hook_template"].format(layer=layer),

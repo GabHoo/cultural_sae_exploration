@@ -13,11 +13,13 @@ model/layer/data/steering behavior — nothing else in the codebase should need 
 # (path-like, or terse codes) - the actual hook point is read back afterward from
 # sae.cfg.metadata.hook_name, so nothing downstream needs to know which scheme is used.
 #
-# Verified against SAELens' own pretrained_saes.yaml (not from memory) - Gemma 3 SAEs
-# do exist, released as "gemma-scope-2-*" (the "2" = 2nd-gen GemmaScope suite, applied
-# to Gemma 3 - a confusing name, NOT "for Gemma 2"). Unlike gpt2-small/Gemma 2 "canonical"
-# releases (one SAE per layer, every layer), Gemma 3 SAEs only exist at a handful of
-# layers per model size - LAYER must be one of the values noted below, not any integer.
+# Gemma 3 SAEs are released as "gemma-scope-2-*" (the "2" = 2nd-gen GemmaScope suite,
+# applied to Gemma 3 - a confusing name, NOT "for Gemma 2"). Unlike gpt2-small/Gemma 2
+# "canonical" releases (one SAE per layer, every layer), Gemma 3 SAEs only exist at a
+# handful of layers per model size. The "valid_layers" strings below are a human-readable
+# hint ONLY, not authoritative (one was already found stale - see layers.py) - the real
+# list is discovered live at runtime via layers.discover_layers(), which reads SAELens'
+# own pretrained_saes.yaml metadata (no network calls, no guessing).
 #
 # "model" vs "release", and why Gemma entries point "model" at an -it checkpoint: the SAE
 # (`release`) is always the one trained on the BASE/pretrained checkpoint - that's the only
@@ -41,7 +43,7 @@ PRESETS = {
     "gemma-1-2b":   dict(model="gemma-2b",                release="gemma-2b-res-jb",                  hook_template="blocks.{layer}.hook_resid_post",    valid_layers="any of 0-17"),
     "gemma-2-2b":   dict(model="gemma-2-2b-it",           release="gemma-scope-2b-pt-res-canonical",  hook_template="layer_{layer}/width_16k/canonical", valid_layers="any of 0-25"),
     "gemma-2-9b":   dict(model="gemma-2-9b-it",           release="gemma-scope-9b-pt-res-canonical",  hook_template="layer_{layer}/width_16k/canonical", valid_layers="any of 0-41 (model used in the CuE paper)"),
-    "gemma-3-1b":   dict(model="google/gemma-3-1b-it",    release="gemma-scope-2-1b-pt-res",          hook_template="layer_{layer}_width_16k_l0_medium", valid_layers="13, 17, or 22 only"),
+    "gemma-3-1b":   dict(model="google/gemma-3-1b-it",    release="gemma-scope-2-1b-pt-res",          hook_template="layer_{layer}_width_16k_l0_medium", valid_layers="7, 13, 17, or 22 (see layers.discover_layers - this string previously missed layer 7)"),
     "gemma-3-4b":   dict(model="google/gemma-3-4b-it",    release="gemma-scope-2-4b-pt-res",          hook_template="layer_{layer}_width_16k_l0_medium", valid_layers="9, 17, 22, or 29 only"),
     "gemma-3-12b":  dict(model="google/gemma-3-12b-it",   release="gemma-scope-2-12b-pt-res",         hook_template="layer_{layer}_width_16k_l0_medium", valid_layers="24, 31, or 41 only"),
     "gemma-3-27b":  dict(model="google/gemma-3-27b-it",   release="gemma-scope-2-27b-pt-res",         hook_template="layer_{layer}_width_16k_l0_medium", valid_layers="31, 40, or 53 only"),
@@ -49,7 +51,11 @@ PRESETS = {
 }
 
 PRESET_NAME = "gemma-3-1b"   # <-- pick one of the keys in PRESETS above
-LAYER = 17                   # <-- which layer to probe/steer; must be valid for the chosen preset (see "valid_layers" above)
+LAYERS = "all"                # "all" = every layer layers.discover_layers() finds published for this
+                               # preset's SAE release (see cultural_neurons/layers.py) - or an explicit
+                               # list[int], e.g. [13, 17], to use only specific layers. Steering itself
+                               # (paper Sec 3/App. C) is applied at every layer that ends up with any
+                               # selected feature in S - not necessarily every layer loaded here.
 
 # ============================================================
 # Data
@@ -118,8 +124,9 @@ AUGMENTATION_VERIFY_MODEL = "claude-sonnet-5"
 # covering ALL assertions in a source (not just a sampled subset), so changing
 # TRAIN_FRACTION / HELDOUT_FRACTION / COUNTRIES never needs a new forward pass - only
 # new data does. Each (model, SAE release, layer, pooling, aliases) config gets its own
-# file under CACHE_DIR (see activation_cache.cache_path()) - switching PRESET_NAME/LAYER
-# back and forth reuses whichever cache already exists instead of overwriting it.
+# file under CACHE_DIR (see activation_cache.cache_path()) - ONE file per layer, even in
+# multi-layer mode - so switching PRESET_NAME/LAYERS back and forth, or adding/removing
+# a layer, reuses whichever per-layer caches already exist instead of overwriting them.
 CACHE_DIR = "data/cache"
 CANDLE_CACHE_NAME = "candle_countries"
 AUGMENTED_CACHE_NAME = "candle_countries_augmented"
@@ -137,13 +144,12 @@ MI_RHO = 0.1   # keep the smallest top-MI feature prefix whose cumulative MI rea
 # ============================================================
 # Steering
 # ============================================================
-ALPHA = 1.5                 # steering strength; alpha=0 reproduces the unsteered baseline. The paper
+ALPHA = 1.0                 # steering strength; alpha=0 reproduces the unsteered baseline. The paper
                              # (App. C) sweeps alpha in {0.25, 0.5, 1, 2} per country and DISCARDS any
                              # value that produces low-fluency generations - it never uses one fixed
                              # value for every country. We don't have that fluency-filtered sweep here
-                             # yet; 1.0 (mid of their tested range) is a safer default than a fixed 3.0,
-                             # which sits outside anything the paper validated and risks degenerate
-                             # output on its own, on top of the -pt/-it prompting mismatch (see PRESETS).
+                             # yet; pinned to 1.0 deliberately for now (manual judgment call on whether
+                             # to raise it, once multi-layer steering is in) rather than auto-tuned.
 EVAL_PROMPTS_PATH = "data/eval_prompts.json"   # culture-agnostic prompts, like the paper's evaluation set (Table 4)
 N_TARGET_SAMPLE = None         # how many countries to evaluate as steering targets; set to None to run all 22
 EVAL_RESULTS_DIR = "results"   # each run writes its own timestamped file here - see main.py's results_path()
